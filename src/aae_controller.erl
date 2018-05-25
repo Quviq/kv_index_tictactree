@@ -548,12 +548,12 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
     
     ReturnFun0 = 
         fun({KeyClockList, SubTree}) ->
-            ReturnFun(KeyClockList),
             ReplaceFun = 
                 fun({_IdxN, T, SegM}) ->
                     aae_treecache:cache_replacedirtysegments(T, SegM, GUID)
                 end,
-            lists:foreach(ReplaceFun, SubTree)
+            lists:foreach(ReplaceFun, SubTree),
+            ReturnFun(KeyClockList)
         end,
     SizeFun =
         fun({KeyClockList, _SubTree}) ->
@@ -836,7 +836,7 @@ handle_unexpected_key(Bucket, Key, IndexN, TreeCaches) ->
 -spec hash_clocks(version_vector(), version_vector()) 
                                                     -> {integer(), integer()}.
 %% @doc
-%% Has the version vectors 
+%% Hash the version vectors 
 hash_clocks(CurrentVV, PrevVV) ->
     {hash_clock(CurrentVV), hash_clock(PrevVV)}.
 

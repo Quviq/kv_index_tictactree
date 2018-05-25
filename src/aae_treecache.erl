@@ -256,6 +256,7 @@ handle_cast({replace_dirtysegments, SegmentMap, FoldGUID}, State) ->
                             SegmentMap),
             {noreply, State#state{tree = UpdTree}};
         _ ->
+            aae_util:log("C0007", [FoldGUID, State#state.active_fold], logs()),
             {noreply, State}
     end;
 handle_cast(destroy, State) ->
@@ -393,7 +394,8 @@ logs() ->
         {"C0003", {info, "Saving tree cache to path ~s and filename ~s"}},
         {"C0004", {info, "Destroying tree cache for partition ~w"}},
         {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}},
-        {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}}].
+        {"C0006", {info, "Altering segment for PartitionID=~w ID=~w Hash=~w"}},
+        {"C0007", {info, "Replace segments refused due to mismatch of GUID ~w ~w"}}].
 
 %%%============================================================================
 %%% Test
