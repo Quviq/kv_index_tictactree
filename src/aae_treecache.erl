@@ -394,7 +394,7 @@ logs() ->
         {"C0003", {info, "Saving tree cache to path ~s and filename ~s"}},
         {"C0004", {info, "Destroying tree cache for partition ~w"}},
         {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}},
-        {"C0006", {info, "Altering segment for PartitionID=~w ID=~w Hash=~w"}},
+        {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}},
         {"C0007", {info, "Replace segments refused due to mismatch of GUID ~w ~w"}}].
 
 %%%============================================================================
