@@ -10,5 +10,5 @@ rel/example_project
 .rebar
 .DS_Store
 _build/*
-rebar.lock
 aae_data/*
+current_counterexample.eqc
