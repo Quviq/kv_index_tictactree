@@ -13,17 +13,17 @@
 -compile([export_all, nowarn_export_all]).
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 
--define(LOG_LEVELS, [warn, error, critical]).
+-define(LOG_LEVELS, [error, critical]).
 -define(EXCHANGE_PAUSE_MS, 10).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    #{aae_controllers => 
-          [{"a", #{store => []}}, 
+    #{aae_controllers =>
+          [{"a", #{store => []}},
            {"b", #{store => []}}], %% list of controllers, each unique map
-      history => 
-          [] %% {Bucket, Key, VClock, LastModified}
-      }.  
+      history =>
+          #{} %% #{Path => {{Bucket, Key}, VClock, LastModified}}
+      }.
 
 %% -- Generators -------------------------------------------------------------
 
@@ -47,20 +47,22 @@ names() ->
 
 %% Cannot be atoms!
 %% key() type specified: should be binary().
-gen_bucket() -> 
+gen_bucket() ->
     elements([<<"bucket1">>, <<"bucket2">>, <<"bucket3">>]).
 
 gen_key() ->
     binary(16).
 
-gen_bkcm(S) ->
-    ?LET({B, K}, frequency([{length(maps:get(history, S, [])), ?LAZY(elements([F || {F, _, _} <-maps:get(history, S)]))},
-                            {10, {gen_bucket(), gen_key()}}]), 
-         case lists:keyfind({B, K}, 1, maps:get(history, S, [])) of
+%% Add undefined (possibly weighted_default. This should not influence the behaviour.
+gen_bkcm(Path, S) ->
+    PathHist = maps:get(Path, maps:get(history, S), []),
+    ?LET({B, K}, frequency([{length(PathHist), ?LAZY(elements([F || {F, _, _} <- PathHist]))},
+                            {10, {gen_bucket(), gen_key()}}]),
+         case lists:keyfind({B, K}, 1, PathHist) of
              false ->
-                 {B, K, none, gen_vclock(), gen_last_modified()};
+                 {B, K, elements([none, undefined]), gen_vclock(), gen_last_modified()};
              {_, PrevClock, _LastModifed} ->
-                 {B, K, PrevClock, gen_vclock(PrevClock), gen_last_modified()}
+                 {B, K, elements([PrevClock, undefined]), gen_vclock(PrevClock), gen_last_modified()}
          end).
 
 gen_last_modified() ->
@@ -73,12 +75,12 @@ gen_store([], Store2) ->
 gen_store([{{B, K}, C1, LM1} | Store1], Store2) ->
     case lists:keyfind({B, K}, 1, Store2) of
         false ->
-            [ {{B, K}, C1, LM1} | gen_store(Store1, Store2) ]; 
+            [ {{B, K}, C1, LM1} | gen_store(Store1, Store2) ];
         {_, C2, _} ->
-            [ {{B, K}, gen_vclock(elements([C1, C2])), gen_last_modified()} | 
+            [ {{B, K}, gen_vclock(elements([C1, C2])), gen_last_modified()} |
               gen_store(Store1, lists:keydelete({B,K}, 1, Store2))]
     end.
-    
+
 
 %% -- Common pre-/post-conditions --------------------------------------------
 command_precondition_common(_S, _Cmd) ->
@@ -101,11 +103,11 @@ start_pre(S) ->
 
 start_args(S) ->
     ?LET({Path, M}, elements(unstarted_controllers(S)),
-         [ Path, 
-           {parallel, leveled_ko}, 
-           maps:get(store, M, []) == [], 
+         [ Path,
+           {parallel, leveled_ko},
+           maps:get(store, M, []) == [],
            elements([{1, 1}, {0, 3600}]), %% if hours is set to 1 it means we cannot trigger a rebuild in a test
-           [{0, 3}, {1, 3}, {2,3}],   %% behaviour is not different for less
+           [{0, 3}, {1, 3}, {2, 3}],   %% behaviour is not different for less
            {var, dir}
          ]).
 
@@ -121,7 +123,7 @@ start_pre(S, [Path, _KeyStoreType, _IsEmpty, _RebuildSchedule, _PrefLists, _Root
     end.
 
 start(Path, KeyStoreType, IsEmpty, RebuildSchedule, PrefLists, RootPath) ->
-    case catch aae_controller:aae_start(KeyStoreType, IsEmpty, RebuildSchedule, PrefLists, 
+    case catch aae_controller:aae_start(KeyStoreType, IsEmpty, RebuildSchedule, PrefLists,
                                          filename:join(RootPath, Path),
                                          fun object_split/1,
                                          ?LOG_LEVELS) of
@@ -133,10 +135,10 @@ start_next(S, Value, [Path, _KeyStoreType, IsEmpty, _RebuildSchedule, PrefLists,
     Controllers = maps:get(aae_controllers, S),
     {_, Map} = lists:keyfind(Path, 1, Controllers),
     RebuildIsDue = (not IsEmpty andalso maps:get(store, Map, []) == []),
-    S#{aae_controllers => 
+    S#{aae_controllers =>
            lists:keyreplace(Path, 1, Controllers, {Path, Map#{aae_controller => Value,
                                                               rebuild_due => RebuildIsDue,
-                                                              preflists => PrefLists}})}. 
+                                                              preflists => PrefLists}})}.
 
 start_post(_S, _Args, Res) ->
     is_pid(Res).
@@ -163,7 +165,7 @@ stop(_, Pid) ->
 stop_next(S, _Value, [Path, _Pid]) ->
     Controllers = maps:get(aae_controllers, S),
     {_, M} = lists:keyfind(Path, 1, Controllers),
-    S#{aae_controllers => 
+    S#{aae_controllers =>
            lists:keyreplace(Path, 1, Controllers, {Path,  maps:without([aae_controller], M)})}.
 
 stop_post(_S, [_, _Pid], Res) ->
@@ -191,7 +193,7 @@ nextrebuild_post(S, [Path, _Pid], Res) ->
     Controllers = maps:get(aae_controllers, S),
     {_, M} = lists:keyfind(Path, 1, Controllers),
     not maps:get(rebuild_due, M) orelse Res.
-            
+
 
 nextrebuild_features(_S, [_, _Pid], Res) ->
     [ {nextrebuild, Res} ].
@@ -202,9 +204,10 @@ put_pre(S) ->
     started_controllers(S) =/= [].
 
 put_args(S) ->
-    ?LET({{Path, M}, {B, K, PClock, VClock, LastMod}}, {elements(started_controllers(S)), gen_bkcm(S)},
-         [Path, maps:get(aae_controller, M), 
-          maps:get(preflists, M), B, K, VClock, PClock, {pos(), pos(), 0, LastMod, []}]).
+    ?LET({Path, M}, elements(started_controllers(S)),
+         ?LET({B, K, PClock, VClock, LastMod}, gen_bkcm(Path, S),
+              [Path, maps:get(aae_controller, M),
+               maps:get(preflists, M), B, K, VClock, PClock, {pos(), pos(), 0, LastMod, []}])).
 
 put_pre(_S, [_Path, _Pid, _PrefLists, _Bucket, _Key, _CurrentClock, _PrevClock, _MetaData]) ->
     true.
@@ -216,14 +219,16 @@ put(_Path, Pid, PrefLists, Bucket, Key, CurrentClock, PrevClock, MetaData) ->
 put_next(S, _Value, [Path, _Pid, _PrefLists, Bucket, Key, CurrentClock, _PrevClock, {_, _, _, LastMod, _}]) ->
     Controllers = maps:get(aae_controllers, S),
     {_, M} = lists:keyfind(Path, 1, Controllers),
-    S#{aae_controllers => 
-           lists:keyreplace(Path, 1, Controllers, 
+    History = maps:get(history, S),
+    PathHistory = maps:get(Path, History, []),
+    S#{aae_controllers =>
+           lists:keyreplace(Path, 1, Controllers,
                             {Path, M#{store =>
                                           [ {{B, K}, C, L} || {{B, K}, C, L} <- maps:get(store, M), {Bucket, Key} =/= {B, K}] ++
-                                          [ {{Bucket, Key}, CurrentClock, LastMod} ] 
+                                          [ {{Bucket, Key}, CurrentClock, LastMod} ]
                                           }}),
        history =>
-           maps:get(history, S, []) ++ [{{Bucket, Key}, CurrentClock, LastMod}]
+           History#{Path => PathHistory ++ [{{Bucket, Key}, CurrentClock, LastMod}]}
       }.
 
 
@@ -248,21 +253,21 @@ exchange_args(S) ->
          ])).
 
 exchange_pre(S, [Path1, Path2, _Blue, _Pink]) ->
-    lists:keymember(Path1, 1, started_controllers(S)) andalso 
+    lists:keymember(Path1, 1, started_controllers(S)) andalso
         lists:keymember(Path2, 1, started_controllers(S)).
 
 exchange(_, _, [BluePid, BluePrefLists], [PinkPid, PinkPrefLists]) ->
     BlueList =  [{testutil:exchange_sendfun(BluePid), BluePrefLists}],
     PinkList =  [{testutil:exchange_sendfun(PinkPid), PinkPrefLists}],
     QuickCheck = self(),
-    {ok, Pid, _UUID} = aae_exchange:start(full, BlueList, PinkList, 
-                                          fun(KeyList) -> QuickCheck ! {self(), repair, KeyList} end, %% do not repair at all 
+    {ok, Pid, _UUID} = aae_exchange:start(full, BlueList, PinkList,
+                                          fun(KeyList) -> QuickCheck ! {self(), repair, KeyList} end, %% do not repair at all
                                           fun(Result) -> QuickCheck ! {self(), reply, Result} end,
                                           none,
                                           [{transition_pause_ms, ?EXCHANGE_PAUSE_MS},
                                             {log_levels, ?LOG_LEVELS}]),
     receive
-        {Pid, reply, {root_compare, 0}} ->            
+        {Pid, reply, {root_compare, 0}} ->
             {root_compare, 0};
         {Pid, reply, Other} ->
             receive
@@ -276,12 +281,12 @@ exchange(_, _, [BluePid, BluePrefLists], [PinkPid, PinkPrefLists]) ->
 exchange_post(S, [Path1, Path2, _Blue, _Pink], Res) ->
     {_, M1} = lists:keyfind(Path1, 1, maps:get(aae_controllers, S, [])),
     {_, M2} = lists:keyfind(Path2, 1, maps:get(aae_controllers, S, [])),
-    BlueStore = maps:get(store, M1, []), 
+    BlueStore = maps:get(store, M1, []),
     PinkStore = maps:get(store, M2, []),
     BlueUnique = BlueStore -- PinkStore,
     PinkUnique = PinkStore -- BlueStore,
     Keys = lists:usort([ {B, K} || {{B, K}, _, _} <- BlueUnique ++ PinkUnique ]),
-    Expected = 
+    Expected =
         [ {Key, {case lists:keyfind(Key, 1, BlueUnique) of
                      false -> none;
                      {_, BC, _} -> BC
@@ -291,11 +296,11 @@ exchange_post(S, [Path1, Path2, _Blue, _Pink], Res) ->
                      {_, PC, _} -> PC
                  end}} || Key <- Keys ],
     case Res of
-        {root_compare, 0} -> 
+        {root_compare, 0} ->
             eq(0, length(Keys));
-        {repair, {clock_compare, N}, KeyList} -> 
-            N == length(Keys) 
-                andalso N == length(KeyList) 
+        {repair, {clock_compare, N}, KeyList} ->
+            N == length(Keys)
+                andalso N == length(KeyList)
                 andalso eq(KeyList, Expected);
         _ -> eq(Res, length(Keys))  %% will print the difference
     end.
@@ -316,17 +321,20 @@ sync_args(S) ->
     Controllers = started_controllers(S),
     ?LET({Path1, M1}, elements(Controllers),
     ?LET({Path2, M2}, elements(Controllers -- [{Path1, M1}]),
-         [ Path1, Path2, 
+         [ Path1, Path2,
            maps:get(preflists, M1), maps:get(preflists, M2),
            maps:get(aae_controller, M1), maps:get(aae_controller, M2),
            gen_store(maps:get(store, M1), maps:get(store, M2)) ])).
 
 
 sync_pre(S, [Path1, Path2, _, _, _, _, _Store]) ->
-    lists:keymember(Path1, 1, started_controllers(S)) andalso 
+    lists:keymember(Path1, 1, started_controllers(S)) andalso
         lists:keymember(Path2, 1, started_controllers(S)).
 
-
+%% Sync is only in the model. Don't use store as last argument, but run fold over
+%% Pid 1, putting all in Pid 2 and vice versa. This results in many puts, but no
+%% problem with shrinking the generated store
+%% If possible, use wrap call and go over the stores in the state
 sync(_Path1, _Path2, _PrefLists1, _PrefLists2, _Pid1, _Pid2, []) ->
     ok;
 sync(Path1, Path2, PrefLists1, PrefLists2, Pid1, Pid2, [{{B, K}, VC, LastMod}|Store]) ->
@@ -339,13 +347,16 @@ sync_next(S, _Value, [Path1, Path2, _PrefLists1, _PrefLists2, _Pid1, _Pid2, Stor
     Controllers = maps:get(aae_controllers, S),
     {_, M1} = lists:keyfind(Path1, 1, Controllers),
     {_, M2} = lists:keyfind(Path2, 1, Controllers),
-    S#{aae_controllers => 
-           lists:keyreplace(Path1, 1, 
+    Hist = maps:get(history, S, []),
+    Hist1 = Hist#{Path1 => maps:get(Path1, Hist, []) ++ Store},
+    Hist2 = Hist1#{Path2 => maps:get(Path2, Hist, []) ++ Store},
+    S#{aae_controllers =>
+           lists:keyreplace(Path1, 1,
                             lists:keyreplace(Path2, 1, Controllers,
                             {Path2, M2#{store => Store}}),
                             {Path1, M1#{store => Store}}),
        history =>
-           maps:get(history, S, []) ++ Store
+           Hist2
       }.
 
 
@@ -356,7 +367,7 @@ sync_next(S, _Value, [Path1, Path2, _PrefLists1, _PrefLists2, _Pid1, _Pid2, Stor
 %% -- Property ---------------------------------------------------------------
 prop_aae() ->
     Dir = "./aae_data",
-    eqc:dont_print_counterexample( 
+    eqc:dont_print_counterexample(
     ?FORALL(Cmds, commands(?MODULE),
     begin
         os:cmd("rm -rf " ++ Dir),
@@ -398,4 +409,3 @@ unstarted_controllers(S) ->
 started_controllers(S) ->
     Controllers = maps:get(aae_controllers, S, []),
     lists:filter(fun({_, M}) -> maps:is_key(aae_controller, M) end, Controllers).
-
