@@ -1,9 +1,9 @@
-%%% @author Thomas Arts <thomas@SpaceGrey.local>
-%%% @copyright (C) 2019, Thomas Arts
+%%% @author Thomas Arts
 %%% @doc
 %%%
 %%% @end
-%%% Created :  5 Feb 2019 by Thomas Arts <thomas@SpaceGrey.local>
+%%% Created :  5 Feb 2019 by Thomas Arts
+%%% Updated : Aug 2020 by Thomas Arts
 
 -module(aae_eqc).
 
@@ -12,6 +12,8 @@
 
 -compile([export_all, nowarn_export_all]).
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
+
+-import(eqc_statem, [conj/1, tag/2]).
 
 -define(LOG_LEVELS, [error, critical]).
 -define(EXCHANGE_PAUSE_MS, 10).
@@ -66,7 +68,7 @@ gen_bkcm(Path, S) ->
          end).
 
 gen_last_modified() ->
-    [{1549, choose(448000, 448100), 0}].
+    [{1597, choose(55581, 55600), 0}].
 
 
 %% generate a new store
@@ -157,7 +159,7 @@ stop_args(S) ->
 
 stop_pre(S, [Path, Pid]) ->
     {_, M} = lists:keyfind(Path, 1, maps:get(aae_controllers, S)),
-    Pid == maps:get(aae_controller, M).  %% for shrinking
+    Pid == maps:get(aae_controller, M, undefined).  %% for shrinking
 
 stop(_, Pid) ->
     catch aae_controller:aae_close(Pid).
@@ -221,15 +223,20 @@ put_next(S, _Value, [Path, _Pid, _PrefLists, Bucket, Key, CurrentClock, _PrevClo
     {_, M} = lists:keyfind(Path, 1, Controllers),
     History = maps:get(history, S),
     PathHistory = maps:get(Path, History, []),
-    S#{aae_controllers =>
-           lists:keyreplace(Path, 1, Controllers,
-                            {Path, M#{store =>
-                                          [ {{B, K}, C, L} || {{B, K}, C, L} <- maps:get(store, M), {Bucket, Key} =/= {B, K}] ++
-                                          [ {{Bucket, Key}, CurrentClock, LastMod} ]
-                                          }}),
-       history =>
-           History#{Path => PathHistory ++ [{{Bucket, Key}, CurrentClock, LastMod}]}
-      }.
+    Store = maps:get(store, M),
+    case lists:keyfind({Bucket, Key}, 1, Store) of
+        {_, CurrentClock, _} -> S;  %% under can this ever happen that we update timestamp but not clock?
+        _ ->
+            S#{aae_controllers =>
+                   lists:keyreplace(Path, 1, Controllers,
+                                    {Path, M#{store =>
+                                                  [ {{B, K}, C, L} || {{B, K}, C, L} <- maps:get(store, M), {Bucket, Key} =/= {B, K}] ++
+                                                  [ {{Bucket, Key}, CurrentClock, LastMod} ]
+                                             }}),
+               history =>
+                   History#{Path => PathHistory ++ [{{Bucket, Key}, CurrentClock, LastMod}]}
+              }
+    end.
 
 
 put_post(_S, [_Path, _Pid, _PrefLists, _Bucket, _Key, _CurrentClock, _PrevClock, _MetaData], Res) ->
@@ -299,9 +306,9 @@ exchange_post(S, [Path1, Path2, _Blue, _Pink], Res) ->
         {root_compare, 0} ->
             eq(0, length(Keys));
         {repair, {clock_compare, N}, KeyList} ->
-            N == length(Keys)
-                andalso N == length(KeyList)
-                andalso eq(KeyList, Expected);
+            eqc_statem:conj([tag(org_keys, eq(N, length(Keys))),
+                             tag(ret_keys, eq(N, length(KeyList))),
+                             eq(KeyList, Expected)]);
         _ -> eq(Res, length(Keys))  %% will print the difference
     end.
 
